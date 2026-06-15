@@ -1,7 +1,15 @@
 import serial, time
 
-PORT = '/dev/ttyUSB0'
+PORT   = '/dev/ttyUSB0'
+BAUD   = 9600
+SLAVE  = 0x01
 
+ser = serial.Serial(PORT, BAUD, bytesize=8, parity='N', stopbits=1, timeout=1)
+time.sleep(0.1)
+ser.flushInput()
+
+# Exact frame: slave=01, func=03, start=0x0000, count=7 registers
+# CRC recalculated for count=7 at 9600
 def crc16(data):
     crc = 0xFFFF
     for byte in data:
@@ -13,41 +21,19 @@ def crc16(data):
                 crc >>= 1
     return crc & 0xFF, (crc >> 8) & 0xFF
 
-ser = serial.Serial(PORT, 4800, bytesize=8, parity='N', stopbits=1, timeout=1)
-time.sleep(0.1)
-ser.flushInput()
+frame = [0x01, 0x03, 0x00, 0x00, 0x00, 0x07]
+lo, hi = crc16(frame)
+frame += [lo, hi]
+print(f"Sending: {' '.join(f'{b:02X}' for b in frame)}")
 
-# ── Step 1: Broadcast slave ID enquiry (page 7) ──────────────────────────
-# Works regardless of slave address - good sanity check
-print("=== Step 1: Broadcast slave ID enquiry ===")
-broadcast = bytes([0xFF, 0x03, 0x07, 0xD0, 0x00, 0x01, 0x91, 0x59])
-ser.write(broadcast)
+ser.write(bytes(frame))
 time.sleep(0.5)
-resp = ser.read(20)
-print(f"Response: {' '.join(f'{b:02X}' for b in resp)}")
-# Expected: FF 03 02 00 01 50 50
-# byte[3:5] = slave address
+resp = ser.read(50)
+print(f"Raw response ({len(resp)} bytes): {' '.join(f'{b:02X}' for b in resp)}")
 
-if len(resp) >= 5:
-    slave = resp[4]
-    print(f"Sensor slave address = {slave}")
-else:
-    slave = 1
-    print("No response to broadcast - check A/B wiring, trying slave=1 anyway")
-
-# ── Step 2: Read all 7 registers using exact datasheet frame ─────────────
-print("\n=== Step 2: Read humidity+temp+EC+pH+N+P+K ===")
-# Exact frame from page 4: 01 03 00 00 00 07 04 08
-read_all = bytes([0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08])
-ser.flushInput()
-ser.write(read_all)
-time.sleep(0.5)
-resp2 = ser.read(25)
-print(f"Raw: {' '.join(f'{b:02X}' for b in resp2)}")
-# Expected: 01 03 0E [14 bytes data] [2 bytes CRC]
-
-if len(resp2) >= 19 and resp2[0] == 0x01 and resp2[1] == 0x03:
-    d = resp2[3:17]
+# Expected: 01 03 0E [14 bytes] [2 CRC] = 19 bytes total
+if len(resp) >= 19 and resp[0] == 0x01 and resp[1] == 0x03 and resp[2] == 0x0E:
+    d = resp[3:17]
     humidity     = int.from_bytes(d[0:2],  'big') / 10
     temperature  = int.from_bytes(d[2:4],  'big') / 10
     conductivity = int.from_bytes(d[4:6],  'big')
@@ -64,6 +50,7 @@ if len(resp2) >= 19 and resp2[0] == 0x01 and resp2[1] == 0x03:
     print(f"  Phosphorus:   {phosphorus} mg/kg")
     print(f"  Potassium:    {potassium} mg/kg")
 else:
-    print("No valid response - try swapping A/B wires then rerun")
+    print(f"\nShort/unexpected response - raw bytes above")
+    print("Paste the raw line and we'll decode it manually")
 
 ser.close()
