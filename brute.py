@@ -11,54 +11,59 @@ def crc16(data):
                 crc = (crc >> 1) ^ 0xA001
             else:
                 crc >>= 1
-    low  = crc & 0xFF
-    high = (crc >> 8) & 0xFF
-    return low, high
+    return crc & 0xFF, (crc >> 8) & 0xFF
 
-def build_frame(slave, func, reg, count):
-    frame = [slave, func, (reg >> 8) & 0xFF, reg & 0xFF,
-             (count >> 8) & 0xFF, count & 0xFF]
-    lo, hi = crc16(frame)
-    frame += [lo, hi]
-    return bytes(frame)
+ser = serial.Serial(PORT, 4800, bytesize=8, parity='N', stopbits=1, timeout=1)
+time.sleep(0.1)
+ser.flushInput()
 
-BAUDS    = [4800, 9600, 2400, 19200, 38400, 1200]
-SLAVES   = [0x01, 0x02, 0xFF]
-FUNCS    = [0x03, 0x04]
-REGS     = [0x0000]
-COUNT    = 9
+# ── Step 1: Broadcast slave ID enquiry (page 7) ──────────────────────────
+# Works regardless of slave address - good sanity check
+print("=== Step 1: Broadcast slave ID enquiry ===")
+broadcast = bytes([0xFF, 0x03, 0x07, 0xD0, 0x00, 0x01, 0x91, 0x59])
+ser.write(broadcast)
+time.sleep(0.5)
+resp = ser.read(20)
+print(f"Response: {' '.join(f'{b:02X}' for b in resp)}")
+# Expected: FF 03 02 00 01 50 50
+# byte[3:5] = slave address
 
-print(f"{'BAUD':>8} {'SLAVE':>6} {'FUNC':>5} {'REG':>5} {'BYTES':>6}  RESPONSE")
-print("-" * 70)
+if len(resp) >= 5:
+    slave = resp[4]
+    print(f"Sensor slave address = {slave}")
+else:
+    slave = 1
+    print("No response to broadcast - check A/B wiring, trying slave=1 anyway")
 
-found = []
+# ── Step 2: Read all 7 registers using exact datasheet frame ─────────────
+print("\n=== Step 2: Read humidity+temp+EC+pH+N+P+K ===")
+# Exact frame from page 4: 01 03 00 00 00 07 04 08
+read_all = bytes([0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08])
+ser.flushInput()
+ser.write(read_all)
+time.sleep(0.5)
+resp2 = ser.read(25)
+print(f"Raw: {' '.join(f'{b:02X}' for b in resp2)}")
+# Expected: 01 03 0E [14 bytes data] [2 bytes CRC]
 
-for baud in BAUDS:
-    try:
-        ser = serial.Serial(PORT, baud, bytesize=8,
-                            parity='N', stopbits=1, timeout=1)
-    except Exception as e:
-        print(f"Could not open port: {e}")
-        break
+if len(resp2) >= 19 and resp2[0] == 0x01 and resp2[1] == 0x03:
+    d = resp2[3:17]
+    humidity     = int.from_bytes(d[0:2],  'big') / 10
+    temperature  = int.from_bytes(d[2:4],  'big') / 10
+    conductivity = int.from_bytes(d[4:6],  'big')
+    ph           = int.from_bytes(d[6:8],  'big') / 10
+    nitrogen     = int.from_bytes(d[8:10], 'big')
+    phosphorus   = int.from_bytes(d[10:12],'big')
+    potassium    = int.from_bytes(d[12:14],'big')
 
-    for slave in SLAVES:
-        for func in FUNCS:
-            for reg in REGS:
-                ser.flushInput()
-                frame = build_frame(slave, func, reg, COUNT)
-                ser.write(frame)
-                time.sleep(0.5)
-                resp = ser.read(50)
+    print(f"\n  Humidity:     {humidity} %RH")
+    print(f"  Temperature:  {temperature} °C")
+    print(f"  Conductivity: {conductivity} µS/cm")
+    print(f"  pH:           {ph}")
+    print(f"  Nitrogen:     {nitrogen} mg/kg")
+    print(f"  Phosphorus:   {phosphorus} mg/kg")
+    print(f"  Potassium:    {potassium} mg/kg")
+else:
+    print("No valid response - try swapping A/B wires then rerun")
 
-                hex_resp = ' '.join(f'{b:02X}' for b in resp)
-                n = len(resp)
-
-                print(f"{baud:>8} {hex(slave):>6} {hex(func):>5} {hex(reg):>5} {n:>6}  {hex_resp}")
-
-                # A valid response starts with slave+func and has >3 bytes
-                if n >= 5 and resp[0] == slave and resp[1] == func:
-                    print(f"\n  *** VALID RESPONSE FOUND ***")
-                    print(f"  Baud={baud}, Slave={hex(slave)}, Func={hex(func)}")
-
-                    # Try to parse register values
-                    data = resp[3:3 + resp[2]]
+ser.close()
